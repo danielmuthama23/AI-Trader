@@ -1,23 +1,49 @@
+import chromadb
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
 import os
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.schema import Document
 
 class RAGEngine:
     def __init__(self):
-        self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        self.vs = Chroma(collection_name="trading", embedding_function=self.embeddings, persist_directory="./chroma_db")
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        chroma_host = os.getenv("CHROMA_HOST", "localhost")
+        chroma_port = int(os.getenv("CHROMA_PORT", 8000))
+        
+        self.client = chromadb.HttpClient(
+            host=chroma_host,
+            port=chroma_port
+        )
+        self.collection = self.client.get_or_create_collection(
+            name="trading_knowledge",
+            metadata={"hnsw:space": "cosine"}
+        )
+
+    def query(self, query_text: str, top_k: int = 5) -> list:
+        """Query RAG knowledge base"""
+        try:
+            embedding = self.embeddings.embed_query(query_text)
+            results = self.collection.query(
+                query_embeddings=[embedding],
+                n_results=top_k
+            )
+            return results.get("documents", [[]])[0] if results else []
+        except Exception as e:
+            print(f"RAG query error: {e}")
+            return []
 
     def ingest(self, documents: list):
-        docs = [Document(page_content=d["content"], metadata=d.get("metadata", {})) for d in documents]
-        self.vs.add_documents(docs)
-
-    def query(self, query: str, top_k: int = 5) -> str:
-        results = self.vs.similarity_search(query, k=top_k)
-        return "\n".join([r.page_content for r in results])
-
-    def ingest_trades(self, trades: list):
-        self.ingest([{
-            "content": f"Trade {t['id']}: {t['pair']} {t['type']} → {t['result']} P&L:{t['pnl']} Strategy:{t['strategy']}",
-            "metadata": {"pair": t["pair"], "result": t["result"]}
-        } for t in trades])
+        """Ingest documents into RAG"""
+        try:
+            for i, doc in enumerate(documents):
+                embedding = self.embeddings.embed_query(doc.get("content", ""))
+                self.collection.add(
+                    ids=[f"doc_{i}"],
+                    embeddings=[embedding],
+                    documents=[doc.get("content", "")],
+                    metadatas=[doc.get("metadata", {})]
+                )
+            print(f"✓ Ingested {len(documents)} documents")
+        except Exception as e:
+            print(f"RAG ingest error: {e}")

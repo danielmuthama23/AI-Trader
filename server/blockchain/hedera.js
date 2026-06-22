@@ -1,19 +1,54 @@
-const { Client, TopicMessageSubmitTransaction, PrivateKey } = require("@hashgraph/sdk");
+const { Client, TopicMessageSubmitTransaction, PrivateKey } = require('@hashgraph/sdk');
 
 class HederaLogger {
   constructor() {
-    try {
+    this.accountId = process.env.HEDERA_ACCOUNT_ID;
+    this.privateKey = process.env.HEDERA_PRIVATE_KEY;
+    this.topicId = process.env.HEDERA_TOPIC_ID;
+    this.client = null;
+
+    if (this.accountId && this.privateKey && this.topicId) {
       this.client = Client.forTestnet();
-      this.client.setOperator(process.env.HEDERA_ACCOUNT_ID, PrivateKey.fromString(process.env.HEDERA_PRIVATE_KEY));
-      this.topicId = process.env.HEDERA_TOPIC_ID;
-    } catch { this.client = null; }
+      this.client.setOperator(this.accountId, PrivateKey.fromString(this.privateKey));
+    }
   }
-  async _submit(msg) {
-    if (!this.client || !this.topicId) return;
-    await new TopicMessageSubmitTransaction().setTopicId(this.topicId).setMessage(msg).execute(this.client);
+
+  async logDecision(data) {
+    if (!this.client) {
+      console.warn('Hedera not configured. Skipping audit log.');
+      return;
+    }
+
+    try {
+      const message = JSON.stringify({
+        type: data.type || 'AI_DECISION',
+        timestamp: Date.now(),
+        version: '1.0',
+        ...data
+      });
+
+      const transaction = await new TopicMessageSubmitTransaction()
+        .setTopicId(this.topicId)
+        .setMessage(message)
+        .execute(this.client);
+
+      console.log('✓ Decision logged to Hedera:', transaction.transactionId.toString());
+      return transaction;
+    } catch (error) {
+      console.error('Hedera logging error:', error);
+    }
   }
-  async logDecision(data) { await this._submit(JSON.stringify({ type: "AI_DECISION", ...data })); }
-  async logTrade(data)    { await this._submit(JSON.stringify({ type: "TRADE", ...data })); }
+
+  async logTrade(tradeData) {
+    return this.logDecision({
+      type: 'TRADE_EXECUTION',
+      pair: tradeData.pair,
+      action: tradeData.action,
+      price: tradeData.price,
+      lots: tradeData.lots,
+      mt4Ticket: tradeData.ticket
+    });
+  }
 }
 
-module.exports = { HederaLogger };
+module.exports = new HederaLogger();

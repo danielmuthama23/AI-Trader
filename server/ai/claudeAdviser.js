@@ -1,34 +1,81 @@
-const Anthropic = require("@anthropic-ai/sdk");
-const { HederaLogger } = require("../blockchain/hedera");
-const { sendAlertEmail } = require("../alerts/email");
+const Anthropic = require('@anthropic-ai/sdk');
+const axios = require('axios');
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const hedera = new HederaLogger();
+const client = new Anthropic();
 
-const MCP_TOOLS = [
-  { name: "get_live_price", description: "Get real-time price", inputSchema: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] } },
-  { name: "get_indicators", description: "Get RSI/MACD/BB",    inputSchema: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] } },
-  { name: "query_rag",      description: "Query knowledge base",inputSchema: { type: "object", properties: { query:  { type: "string" } }, required: ["query"]  } },
+const TOOLS = [
+  {
+    name: 'get_live_price',
+    description: 'Get current price for a trading pair',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pair: { type: 'string', description: 'Trading pair (e.g., EUR/USD)' }
+      },
+      required: ['pair']
+    }
+  },
+  {
+    name: 'get_indicators',
+    description: 'Get technical indicators for a pair',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pair: { type: 'string' }
+      },
+      required: ['pair']
+    }
+  },
+  {
+    name: 'query_rag',
+    description: 'Query RAG knowledge base for trading patterns',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        topK: { type: 'number' }
+      },
+      required: ['query']
+    }
+  }
 ];
 
 async function askAdviser(message, context) {
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6", max_tokens: 1000, tools: MCP_TOOLS,
-    messages: [{ role: "user", content: `Expert AI trading adviser.\nContext: ${JSON.stringify(context)}\nQuestion: ${message}\nProvide actionable advice: signal, entry, SL, TP, confidence %, strategy.` }],
-  });
-  const text = response.content.filter(b => b.type === "text").map(b => b.text).join("\n");
-  await hedera.logDecision({ message, response: text, timestamp: Date.now() });
-  if (text.toLowerCase().includes("strong buy") || text.toLowerCase().includes("strong sell"))
-    await sendAlertEmail({ subject: "High Confidence Signal", body: text });
-  return text;
+  try {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      tools: TOOLS,
+      messages: [{
+        role: 'user',
+        content: `You are a professional trading adviser. Market context:\n${JSON.stringify(context)}\n\nUser question: ${message}`
+      }]
+    });
+    
+    return response.content[0]?.text || 'Unable to generate response';
+  } catch (error) {
+    console.error('Claude API error:', error);
+    return `Error: ${error.message}`;
+  }
 }
 
 async function analyzeAndSignal(marketData) {
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6", max_tokens: 300,
-    messages: [{ role: "user", content: `Analyze tick, return ONLY JSON:\n${JSON.stringify(marketData)}\nJSON: {"action":"BUY|SELL|HOLD","confidence":0-100,"sl":0,"tp":0,"reasoning":"...","strategy":"..."}` }],
-  });
-  return JSON.parse(response.content[0].text.replace(/```json|```/g, "").trim());
+  try {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 500,
+      messages: [{
+        role: 'user',
+        content: `Analyze this market data and generate a trading signal. Return JSON only:\n${JSON.stringify(marketData)}\n\nReturn: {"action":"BUY|SELL|HOLD","confidence":0-100,"sl":0,"tp":0,"reasoning":"...","strategy":"..."}`
+      }]
+    });
+    
+    const text = response.content[0]?.text || '{"action":"HOLD","confidence":50}';
+    return JSON.parse(text.replace(/```json/g, '').replace(/```/g, '').trim());
+  } catch (error) {
+    console.error('Signal generation error:', error);
+    return { action: 'HOLD', confidence: 0, reasoning: error.message };
+  }
 }
 
 module.exports = { askAdviser, analyzeAndSignal };
